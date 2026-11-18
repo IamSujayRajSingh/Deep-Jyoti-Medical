@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
-import { Save, Settings as SettingsIcon, Banknote, Mail } from "lucide-react";
+import { Save, Settings as SettingsIcon, Banknote, Mail, CreditCard } from "lucide-react";
 
 import { useToast } from "@/components/ui/use-toast";
 import { getSettings } from "@/lib/orders";
@@ -29,6 +29,7 @@ export default function AdminSettings() {
       const data = {
         admin_email: settings.admin_email,
         cod_enabled: settings.cod_enabled,
+        online_payment_enabled: settings.online_payment_enabled !== false,
         cod_min_order_value: Number(settings.cod_min_order_value) || 0,
         cod_max_order_value: Number(settings.cod_max_order_value) || 0,
         cod_handling_fee: Number(settings.cod_handling_fee) || 0,
@@ -64,6 +65,20 @@ export default function AdminSettings() {
         </div>
         <Button onClick={save} disabled={saving}><Save className="w-4 h-4" /> {saving ? "Saving..." : "Save Settings"}</Button>
       </div>
+
+      {/* Online payment */}
+      <Card>
+        <CardHeader className="pb-2"><CardTitle className="text-lg flex items-center gap-2"><CreditCard className="w-4 h-4" /> Online Payment (Razorpay)</CardTitle></CardHeader>
+        <CardContent className="space-y-2">
+          <div className="flex items-center justify-between">
+            <Label>Enable online payment at checkout</Label>
+            <Switch checked={settings.online_payment_enabled !== false} onCheckedChange={(v) => set("online_payment_enabled", v)} />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Only shown to customers when the Razorpay keys are set on the server. Refunds are made from the Razorpay dashboard; then mark the order's payment as Refunded here.
+          </p>
+        </CardContent>
+      </Card>
 
       {/* COD */}
       <Card>

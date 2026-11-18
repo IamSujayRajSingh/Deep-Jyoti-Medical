@@ -89,6 +89,32 @@ npx wrangler secret put RESEND_API_KEY
 - Test registration with an inbox you control, then request a password reset and follow the link.
 - For local testing, copy `.dev.vars.example` to `.dev.vars` and set the local sender and API key there.
 
+**Set up online payment (Razorpay).** Without these secrets, checkout offers Cash on Delivery only.
+
+- In the Razorpay Dashboard, complete account activation (KYC). Until then only Test Mode works.
+- Account & Settings → API Keys → generate a key. Use the **Test Mode** key first, then switch to the
+  **Live Mode** key once a test order works end to end. Store both values as secrets:
+
+```bash
+npx wrangler secret put RAZORPAY_KEY_ID
+```
+
+```bash
+npx wrangler secret put RAZORPAY_KEY_SECRET
+```
+
+- Account & Settings → Webhooks → Add New Webhook. URL: `https://<your-site>/api/payments/razorpay/webhook`.
+  Choose a secret and tick the events `order.paid`, `payment.captured` and `payment.authorized`. Then:
+
+```bash
+npx wrangler secret put RAZORPAY_WEBHOOK_SECRET
+```
+
+  The webhook creates the order if the customer pays but closes the tab before returning to the site.
+- Test Mode and Live Mode have separate keys **and** separate webhooks; set up both when going live.
+- Admin → Settings has a switch to hide online payment without removing the keys.
+- For local testing, put the test keys in `.dev.vars` (see `.dev.vars.example`).
+
 **7. Connect your domain:** Cloudflare dashboard → Workers & Pages → deep-jyoti-medical → Settings →
 Domains & Routes → Add custom domain. The domain must use Cloudflare's nameservers.
 
@@ -118,6 +144,7 @@ the Workers Paid plan (US$5 a month) removes that limit.
 | --- | --- | --- |
 | Routing and access rules | Products, settings and approved reviews are public. Visitors can submit inquiries and prescriptions. To track an order they must enter its ID and the mobile number used at checkout. The tracking response contains only order status, payment details, and status timestamps | `server/worker.js` (`ENTITIES`, `ROUTES`) |
 | Data | Products, orders, customers, settings, inquiries, prescriptions and reviews are JSON documents in D1. Tables are created automatically on first use | `server/db.js`, `server/schema.js` |
+| Online payment | Razorpay. The server prices the cart and opens a Razorpay order. The real order is created only after Razorpay confirms the payment (signature, amount, status), from the browser or the webhook, exactly once. Unpaid checkouts hold no stock | `server/razorpay.js`, `src/lib/razorpay.js` |
 | Orders | The server checks prices, stock, COD rules and totals. Checkout detects concurrent changes before saving the order and updating the customer and stock in one transaction | `server/orders.js`, `src/lib/orderLogic.js` |
 | Accounts | Email + password (PBKDF2), 6-digit email verification, 30-day sessions, password reset by emailed link | `server/auth.js` |
 | Files | Prescription uploads: JPG/PNG/PDF only, 10 MB, content checked. Stored privately in R2; admins open them through links that expire after 10 minutes | `server/worker.js` |
@@ -133,7 +160,8 @@ links are sent through email. Existing accounts can sign in while email is uncon
 
 - **Email delivery** until Resend is set up (step 6). The Resend connection itself has not been tested
   with a real key.
-- **Online payments.** Checkout is Cash on Delivery only, as in the original. `src/lib/razorpay.js` is unused.
+- **Online payments** until the Razorpay keys are set (see above). Refunds are made in the Razorpay
+  dashboard; then change the order's payment status to Refunded in Admin.
 - **Inquiries have no admin page.** Contact-form inquiries are saved and emailed to the admin address,
   but (as in the original) no screen lists them.
 

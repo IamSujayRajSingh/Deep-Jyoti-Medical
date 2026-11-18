@@ -162,6 +162,11 @@ export default function AdminOrderDetail() {
               <span className="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold bg-muted">
                 {order.payment_method === "cod" ? "Cash on Delivery" : "Online Payment"}
               </span>
+              {order.razorpay_payment_id && (
+                <span className="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-mono bg-muted" title="Razorpay payment ID — refunds are made from the Razorpay dashboard">
+                  {order.razorpay_payment_id}
+                </span>
+              )}
             </div>
           </div>
         </CardContent>

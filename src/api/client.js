@@ -149,6 +149,12 @@ export const db = {
     track: (orderId, phone) => request("POST", "/orders/track", { orderId, phone }),
     resendEmails: (orderId) => request("POST", `/orders/${encodeURIComponent(orderId)}/resend-email`),
   },
+
+  payments: {
+    config: () => request("GET", "/payments/config"),
+    createRazorpayOrder: (payload) => request("POST", "/payments/razorpay/order", payload),
+    verifyRazorpay: (response) => request("POST", "/payments/razorpay/verify", response),
+  },
 };
 
 export default db;

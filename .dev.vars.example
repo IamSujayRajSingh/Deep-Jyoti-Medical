@@ -4,3 +4,10 @@
 # API key from https://resend.com and a sender on a verified domain.
 # RESEND_API_KEY=re_xxxxxxxx
 # EMAIL_FROM="Deep Jyoti Medical <orders@yourdomain.com>"
+
+# Razorpay (online payment). Use TEST keys locally: Razorpay Dashboard → switch to Test Mode →
+# Account & Settings → API Keys. Without these, checkout offers Cash on Delivery only.
+# RAZORPAY_KEY_ID=rzp_test_xxxxxxxx
+# RAZORPAY_KEY_SECRET=xxxxxxxx
+# Optional locally (Razorpay cannot reach localhost). Must match the secret set on the webhook.
+# RAZORPAY_WEBHOOK_SECRET=xxxxxxxx

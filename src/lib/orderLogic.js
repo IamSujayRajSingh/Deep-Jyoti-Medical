@@ -40,6 +40,7 @@ export const DELIVERY_LABELS = {
 export const DEFAULT_SETTINGS = {
   admin_email: BUSINESS.email,
   cod_enabled: true,
+  online_payment_enabled: true,
   cod_min_order_value: 0,
   cod_max_order_value: 50000,
   cod_handling_fee: 0,
@@ -126,7 +127,7 @@ export function customerEmailBody(order, origin) {
     .join("");
   const codLine = order.payment_method === "cod"
     ? `<p style="background:#f5f5f0;padding:12px;border-radius:6px"><strong>Payment Method: Cash on Delivery</strong><br/>Amount Payable on Delivery: <strong style="font-size:18px">${formatINR(order.final_total)}</strong></p>`
-    : `<p><strong>Payment Method:</strong> Online</p>`;
+    : `<p style="background:#f5f5f0;padding:12px;border-radius:6px"><strong>Payment Method: Paid Online</strong><br/>Amount Paid: <strong style="font-size:18px">${formatINR(order.final_total)}</strong>${order.razorpay_payment_id ? `<br/><span style="color:#666;font-size:13px">Payment ID: ${e(order.razorpay_payment_id)}</span>` : ""}</p>`;
   return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#222">
     <h2 style="color:#1f3a2e">Order Confirmed — #${e(order.order_id)}</h2>
     <p>Thank you for your order with ${e(BUSINESS.name)}! We have received your order and will process it shortly.</p>

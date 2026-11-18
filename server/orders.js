@@ -51,7 +51,7 @@ function validate(body) {
   if (!text(address.line1) || !text(address.city) || !text(address.state))
     throw new HttpError(400, "Please complete the delivery address.");
   if (!/^\d{6}$/.test(text(address.pincode))) throw new HttpError(400, "Enter a valid 6-digit pincode.");
-  if (body.paymentMethod !== "cod") throw new HttpError(400, "Only Cash on Delivery is available.");
+  if (!["cod", "online"].includes(body.paymentMethod)) throw new HttpError(400, "Choose a payment method.");
 
   // Merge duplicate lines for the same product so stock is checked against the total.
   const merged = new Map();
@@ -74,23 +74,24 @@ function validate(body) {
       city: text(address.city, 80), state: text(address.state, 80), pincode: text(address.pincode, 6),
       country: text(address.country, 80) || "India",
     },
-    paymentMethod: "cod",
+    paymentMethod: body.paymentMethod,
   };
 }
 
-export async function placeOrder(env, body, origin) {
-  const { items, customer, address, paymentMethod } = validate(body);
-  const settings = await getSettings(env);
+const trackedStockOf = (product) => {
+  const raw = product.stock_quantity;
+  const tracked = raw === null || raw === undefined || raw === "" ? null : Number(raw);
+  return Number.isFinite(tracked) ? tracked : null;
+};
 
-  // Fresh product snapshot + stock check
+/** Reads each product fresh, checks stock and returns priced order lines. */
+async function priceCart(env, items) {
   const snapshot = [];
   for (const it of items) {
     const product = await records.get(env, "Product", it.id);
     if (!product) throw new HttpError(400, "A product in your cart is no longer available.");
     if (it.qty < 1 || it.qty > 999) throw new HttpError(400, `Invalid quantity for "${product.name}".`);
-    const raw = product.stock_quantity;
-    const tracked = raw === null || raw === undefined || raw === "" ? null : Number(raw);
-    const trackedStock = Number.isFinite(tracked) ? tracked : null;
+    const trackedStock = trackedStockOf(product);
     if (product.stock_status === "out_of_stock" || (trackedStock !== null && trackedStock < it.qty))
       throw new HttpError(409, `Only ${trackedStock ?? 0} unit(s) of "${product.name}" are available.`);
     const unitPrice = Number(product.selling_price) || 0;
@@ -102,13 +103,69 @@ export async function placeOrder(env, body, origin) {
       },
     });
   }
+  return snapshot;
+}
 
+/**
+ * Prices and checks a checkout without saving anything.
+ * Returns { customer, address, paymentMethod, settings, snapshot, totals }.
+ */
+export async function prepareCheckout(env, body) {
+  const checkout = validate(body);
+  const settings = await getSettings(env);
+  const snapshot = await priceCart(env, checkout.items);
   const subtotal = snapshot.reduce((sum, s) => sum + s.line.subtotal, 0);
-  const eligibility = codEligible(subtotal, settings, address.pincode);
-  if (!eligibility.ok) throw new HttpError(400, eligibility.reason);
-  const totals = computeTotals(subtotal, settings, paymentMethod);
+  if (checkout.paymentMethod === "cod") {
+    const eligibility = codEligible(subtotal, settings, checkout.address.pincode);
+    if (!eligibility.ok) throw new HttpError(400, eligibility.reason);
+  } else if (settings.online_payment_enabled === false) {
+    throw new HttpError(400, "Online payment is not available right now.");
+  }
+  return { ...checkout, settings, snapshot, totals: computeTotals(subtotal, settings, checkout.paymentMethod) };
+}
+
+/** Places a Cash on Delivery order. */
+export async function placeOrder(env, body, origin) {
+  const checkout = await prepareCheckout(env, body);
+  if (checkout.paymentMethod !== "cod") throw new HttpError(400, "Online orders are placed after payment.");
+  return writeOrder(env, checkout, {
+    payment_method: "cod", payment_status: "cod", note: "Order placed by customer",
+  }, origin);
+}
+
+/**
+ * Saves a paid online order from the lines and totals the customer paid for.
+ * Stock is re-read now. A paid order is never refused for stock: shortfalls
+ * are written into the admin notes instead.
+ */
+export async function placePaidOrder(env, intent, payment, origin) {
+  const settings = await getSettings(env);
+  const snapshot = [];
+  const shortages = [];
+  for (const line of intent.lines) {
+    const product = await records.get(env, "Product", line.product_id);
+    const trackedStock = product ? trackedStockOf(product) : null;
+    if (!product) shortages.push(`"${line.product_name}" was deleted after payment`);
+    else if (trackedStock !== null && trackedStock < line.quantity)
+      shortages.push(`"${line.product_name}": ${line.quantity} paid, ${trackedStock} in stock`);
+    snapshot.push({ product, trackedStock, line });
+  }
+  return writeOrder(env, { ...intent, settings, snapshot }, {
+    payment_method: "online",
+    payment_status: "paid",
+    razorpay_order_id: payment.razorpay_order_id,
+    razorpay_payment_id: payment.razorpay_payment_id,
+    amount_paid: payment.amount / 100,
+    paid_at: payment.paid_at,
+    note: `Order placed and paid online (Razorpay ${payment.razorpay_payment_id})`,
+    admin_notes: shortages.length ? `STOCK SHORTFALL after payment: ${shortages.join("; ")}` : "",
+  }, origin);
+}
+
+async function writeOrder(env, { customer, address, settings, snapshot, totals }, payment, origin) {
+  const { note, admin_notes = "", ...paymentFields } = payment;
   const now = nowIso();
-  const writes = snapshot.map(({ product }) => guardCheckoutRecord(env, "Product", product));
+  const writes = snapshot.filter((s) => s.product).map(({ product }) => guardCheckoutRecord(env, "Product", product));
 
   // Customer dedup by mobile number, then email.
   const customers = await records.all(env, "Customer");
@@ -160,9 +217,9 @@ export async function placeOrder(env, body, origin) {
     items: snapshot.map((s) => s.line),
     subtotal: totals.subtotal, discount: totals.discount, shipping_fee: totals.shippingFee,
     cod_fee: totals.codFee, tax: totals.tax, final_total: totals.finalTotal,
-    payment_method: paymentMethod, payment_status: "cod",
-    order_status: "new", delivery_status: "pending", admin_notes: "",
-    timeline: [{ status: "new", previous_status: null, changed_by: "system", changed_at: now, note: "Order placed by customer" }],
+    ...paymentFields,
+    order_status: "new", delivery_status: "pending", admin_notes,
+    timeline: [{ status: "new", previous_status: null, changed_by: "system", changed_at: now, note }],
     email_sent: false, customer_email_sent: false, email_error: "",
   });
   writes.push(orderWrite.stmt);
@@ -170,7 +227,7 @@ export async function placeOrder(env, body, origin) {
   // Reduce inventory (only for products whose stock is tracked)
   const lowThreshold = settings.low_stock_threshold || 10;
   for (const s of snapshot) {
-    if (s.trackedStock === null) continue;
+    if (!s.product || s.trackedStock === null) continue;
     const newQty = Math.max(0, s.trackedStock - s.line.quantity);
     writes.push(buildUpdate(env, "Product", s.product, {
       stock_quantity: newQty,
@@ -199,15 +256,17 @@ export async function placeOrder(env, body, origin) {
       console.error("[orders] Could not save email delivery status");
     }
   }
+  return { order_id: order.order_id, order: publicOrder(order) };
+}
+
+/** The parts of an order the customer's confirmation page shows. */
+export function publicOrder(order) {
   const { customer_name, customer_phone, customer_email, delivery_address, order_id, created_date,
-    items: orderItems, subtotal: orderSubtotal, shipping_fee, cod_fee, tax, final_total,
-    payment_method, payment_status, order_status } = order;
-  return {
-    order_id,
-    order: { order_id, customer_name, customer_phone, customer_email, delivery_address, created_date,
-      items: orderItems, subtotal: orderSubtotal, shipping_fee, cod_fee, tax, final_total,
-      payment_method, payment_status, order_status },
-  };
+    items, subtotal, shipping_fee, cod_fee, tax, final_total,
+    payment_method, payment_status, order_status, razorpay_payment_id } = order;
+  return { order_id, customer_name, customer_phone, customer_email, delivery_address, created_date,
+    items, subtotal, shipping_fee, cod_fee, tax, final_total,
+    payment_method, payment_status, order_status, razorpay_payment_id };
 }
 
 export async function sendOrderEmails(env, order, settings, origin) {

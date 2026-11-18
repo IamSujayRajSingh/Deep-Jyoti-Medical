@@ -42,4 +42,7 @@
 	}
 	// Secrets are NOT stored here. Set them with:
 	//   npx wrangler secret put RESEND_API_KEY
+	//   npx wrangler secret put RAZORPAY_KEY_ID
+	//   npx wrangler secret put RAZORPAY_KEY_SECRET
+	//   npx wrangler secret put RAZORPAY_WEBHOOK_SECRET
 }

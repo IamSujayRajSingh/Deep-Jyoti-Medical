@@ -1,6 +1,6 @@
 // Database tables (Cloudflare D1 / SQLite). Shared by the Worker, which creates
 // them automatically on first use, and by scripts/make-admin.mjs.
-export const SCHEMA_VERSION = "2";
+export const SCHEMA_VERSION = "3";
 
 export const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS records (
@@ -62,6 +62,19 @@ export const SCHEMA = [
     reset_at INTEGER NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+  // Online checkouts waiting for payment. id is the Razorpay order id. The real
+  // Order is only created once the payment is confirmed (status 'paid').
+  `CREATE TABLE IF NOT EXISTS payment_intents (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'created',
+    order_id TEXT,
+    payment_id TEXT,
+    error TEXT,
+    created_date TEXT NOT NULL,
+    updated_date TEXT NOT NULL
+  )`,
 ];
 
 // Password hashing parameters. PBKDF2-SHA256 at 100,000 iterations is the

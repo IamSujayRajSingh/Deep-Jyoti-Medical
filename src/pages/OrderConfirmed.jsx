@@ -51,6 +51,14 @@ export default function OrderConfirmed() {
               </div>
             </div>
 
+            {order.payment_method === "online" && order.payment_status === "paid" && (
+              <div className="bg-secondary/10 border border-secondary/30 rounded-lg p-4 text-center">
+                <p className="text-sm text-muted-foreground">Amount Paid Online</p>
+                <p className="font-heading text-3xl font-bold text-secondary">{formatINR(order.final_total)}</p>
+                {order.razorpay_payment_id && <p className="text-xs text-muted-foreground mt-1">Payment ID: {order.razorpay_payment_id}</p>}
+              </div>
+            )}
+
             {order.payment_method === "cod" && (
               <div className="bg-secondary/10 border border-secondary/30 rounded-lg p-4 text-center">
                 <p className="text-sm text-muted-foreground">Amount to Pay on Delivery</p>

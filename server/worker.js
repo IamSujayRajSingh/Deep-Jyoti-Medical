@@ -8,6 +8,7 @@ import { hex, safeEqual } from "./schema.js";
 import * as auth from "./auth.js";
 import { sendEmail } from "./email.js";
 import { placeOrder, trackOrder, sendOrderEmails, getSettings } from "./orders.js";
+import { paymentConfig, createPayment, verifyPayment, handleWebhook } from "./razorpay.js";
 import { escapeHtml } from "../src/lib/orderLogic.js";
 
 const text = (value, max = 500) => String(value ?? "").trim().slice(0, max);
@@ -218,6 +219,13 @@ const ROUTES = [
     if (!order) throw new HttpError(404, "Order not found");
     return json(await sendOrderEmails(c.env, order, await getSettings(c.env), c.origin));
   }],
+
+  // ----- online payments (Razorpay) -----
+  ["GET", "/payments/config", async (c) => json(await paymentConfig(c.env))],
+  ["POST", "/payments/razorpay/order", async (c) => { await limit(c, SUBMIT_LIMIT); return json(await createPayment(c.env, await readJson(c.request)), 201); }],
+  ["POST", "/payments/razorpay/verify", async (c) => { await limit(c, SUBMIT_LIMIT); return json(await verifyPayment(c.env, await readJson(c.request), c.origin)); }],
+  // Called by Razorpay's servers, signed with RAZORPAY_WEBHOOK_SECRET. Not rate-limited.
+  ["POST", "/payments/razorpay/webhook", async (c) => json(await handleWebhook(c.env, c.request, c.origin))],
 
   // ----- email (admin only: never an open relay) -----
   ["POST", "/email/send", async (c) => {

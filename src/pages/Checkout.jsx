@@ -8,13 +8,33 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { ShoppingCart, Truck, MapPin, User, Loader2, Check, ShieldCheck, Banknote } from "lucide-react";
+import { ShoppingCart, Truck, MapPin, User, Loader2, Check, ShieldCheck, Banknote, CreditCard } from "lucide-react";
 import { useCart } from "@/lib/CartContext";
 import { useAuth } from "@/lib/AuthContext";
 
 import { formatINR } from "@/lib/format";
 import { getSettings, computeTotals, codEligible, placeOrder } from "@/lib/orders";
+import { openRazorpayCheckout } from "@/lib/razorpay";
 import { useToast } from "@/components/ui/use-toast";
+
+const LOGO = "/images/99270628e_Deepjyotilogo.png";
+
+// After a successful payment, confirming it can briefly return "being confirmed"
+// (the webhook got there first) or hit a network blip, so retry a few times.
+async function verifyWithRetry(response) {
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      return await db.payments.verifyRazorpay(response);
+    } catch (err) {
+      lastError = err;
+      const retryable = !err.status || err.status === 409 || err.status >= 500;
+      if (!retryable) throw err;
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
 
 const INDIAN_STATES = [
   "Andhra Pradesh","Arunachal Pradesh","Assam","Bihar","Chhattisgarh","Goa","Gujarat","Haryana",
@@ -32,6 +52,9 @@ export default function Checkout() {
   const [settings, setSettings] = useState(null);
   const [products, setProducts] = useState([]);
   const [submitting, setSubmitting] = useState(false);
+  const [stage, setStage] = useState(/** @type {"" | "paying" | "confirming"} */ (""));
+  const [onlineAvailable, setOnlineAvailable] = useState(false);
+  const [method, setMethod] = useState(/** @type {"online" | "cod"} */ ("cod"));
   const [form, setForm] = useState({
     full_name: user?.full_name || "",
     phone: "",
@@ -44,6 +67,10 @@ export default function Checkout() {
 
   useEffect(() => {
     (async () => {
+      db.payments.config().then(
+        (cfg) => { if (cfg?.online) { setOnlineAvailable(true); setMethod("online"); } },
+        () => { /* online payment stays off */ },
+      );
       const s = await getSettings();
       setSettings(s);
       // fetch products in cart for stock validation
@@ -56,8 +83,9 @@ export default function Checkout() {
   }, []);
 
   const subtotal = items.reduce((s, i) => s + i.qty * (i.price || 0), 0);
-  const totals = computeTotals(subtotal, settings, "cod");
+  const totals = computeTotals(subtotal, settings, method);
   const codCheck = settings ? codEligible(subtotal, settings, form.pincode) : { ok: false, reason: "" };
+  const isOnline = method === "online";
 
   const stockIssue = products.find((p) => {
     const ci = items.find((i) => i.id === p.id);
@@ -101,29 +129,68 @@ export default function Checkout() {
       toast({ title: "Stock issue", description: `"${stockIssue.name}" is no longer available in the requested quantity.`, variant: "destructive" });
       return;
     }
-    if (!codCheck.ok) {
+    if (!isOnline && !codCheck.ok) {
       toast({ title: "COD unavailable", description: codCheck.reason, variant: "destructive" });
       return;
     }
+    const mobile = normalizePhone(form.phone);
+    const payload = {
+      items: items.map((i) => ({ id: i.id, qty: i.qty })),
+      customer: {
+        full_name: form.full_name.trim(), phone: `+91 ${mobile}`, email: form.email.trim(), alternate_phone: form.alternate_phone.trim(),
+      },
+      address: {
+        line1: form.line1, line2: form.line2, landmark: form.landmark,
+        city: form.city, state: form.state, pincode: form.pincode, country: form.country,
+      },
+    };
     setSubmitting(true);
+    if (isOnline) return payOnline(payload);
     try {
-      const mobile = normalizePhone(form.phone);
-      const { order_id, order } = await placeOrder({
-        items: items.map((i) => ({ id: i.id, qty: i.qty })),
-        customer: {
-          full_name: form.full_name.trim(), phone: `+91 ${mobile}`, email: form.email.trim(), alternate_phone: form.alternate_phone.trim(),
-        },
-        address: {
-          line1: form.line1, line2: form.line2, landmark: form.landmark,
-          city: form.city, state: form.state, pincode: form.pincode, country: form.country,
-        },
-        paymentMethod: "cod",
-      });
+      const { order_id, order } = await placeOrder({ ...payload, paymentMethod: "cod" });
       clearCart();
       navigate(`/order-confirmed/${order_id}`, { replace: true, state: { order } });
     } catch (err) {
       setSubmitting(false);
       toast({ title: "Order failed", description: err.message || "Could not place order. Please try again.", variant: "destructive" });
+    }
+  };
+
+  const payOnline = async (payload) => {
+    let paid = null;
+    try {
+      setStage("paying");
+      const rzp = await db.payments.createRazorpayOrder(payload);
+      const result = await openRazorpayCheckout({
+        key: rzp.key_id, amount: rzp.amount, currency: rzp.currency, orderId: rzp.razorpay_order_id,
+        name: rzp.name, image: `${window.location.origin}${LOGO}`, prefill: rzp.prefill,
+      });
+      if (result.dismissed) {
+        setSubmitting(false);
+        setStage("");
+        toast(result.error
+          ? { title: "Payment failed", description: result.error.description || "Your payment did not go through. No money was taken.", variant: "destructive" }
+          : { title: "Payment cancelled", description: "Your order has not been placed. You can try again." });
+        return;
+      }
+      paid = result;
+      setStage("confirming");
+      const { order_id, order } = await verifyWithRetry(result);
+      clearCart();
+      navigate(`/order-confirmed/${order_id}`, { replace: true, state: { order } });
+    } catch (err) {
+      setSubmitting(false);
+      setStage("");
+      if (paid) {
+        // Money was taken; the webhook will still create the order. Keep the cart so nothing is lost.
+        toast({
+          title: "Payment received — confirming your order",
+          description: `We could not confirm your order just now. Please don't pay again. Contact us with payment ID ${paid.razorpay_payment_id} if you don't receive a confirmation.`,
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: "Could not start payment", description: err.message || "Please try again.", variant: "destructive" });
+      }
     }
   };
 
@@ -142,7 +209,9 @@ export default function Checkout() {
     <div className="min-h-screen pt-24 lg:pt-28 pb-16 bg-background">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         <h1 className="font-heading text-3xl font-bold text-foreground mb-2">Checkout</h1>
-        <p className="text-muted-foreground mb-8">Complete your details and pay with Cash on Delivery.</p>
+        <p className="text-muted-foreground mb-8">
+          {onlineAvailable ? "Complete your details and pay online or with Cash on Delivery." : "Complete your details and pay with Cash on Delivery."}
+        </p>
 
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
           {/* Left: forms */}
@@ -228,9 +297,24 @@ export default function Checkout() {
               <CardHeader className="pb-3">
                 <CardTitle className="flex items-center gap-2 text-lg"><Banknote className="w-4 h-4" /> Payment Method</CardTitle>
               </CardHeader>
-              <CardContent>
-                <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer transition-colors ${codCheck.ok ? "border-primary bg-primary/5" : "border-border opacity-60"}`}>
-                  <input type="radio" name="payment" checked readOnly disabled={!codCheck.ok} className="mt-1" />
+              <CardContent className="space-y-3">
+                {onlineAvailable && (
+                  <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer transition-colors ${isOnline ? "border-primary bg-primary/5" : "border-border"}`}>
+                    <input type="radio" name="payment" checked={isOnline} onChange={() => setMethod("online")} disabled={submitting} className="mt-1" />
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <CreditCard className="w-4 h-4 text-primary" />
+                        <span className="font-semibold">Pay Online</span>
+                        <Badge variant="secondary" className="text-xs">UPI · Cards · Netbanking · Wallets</Badge>
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        Pay {settings && formatINR(computeTotals(subtotal, settings, "online").finalTotal)} securely via Razorpay.
+                      </p>
+                    </div>
+                  </label>
+                )}
+                <label className={`flex items-start gap-3 p-4 border rounded-lg transition-colors ${!codCheck.ok ? "border-border opacity-60 cursor-not-allowed" : !isOnline ? "border-primary bg-primary/5 cursor-pointer" : "border-border cursor-pointer"}`}>
+                  <input type="radio" name="payment" checked={!isOnline} onChange={() => setMethod("cod")} disabled={!codCheck.ok || submitting} className="mt-1" />
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
                       <Banknote className="w-4 h-4 text-primary" />
@@ -238,7 +322,7 @@ export default function Checkout() {
                       {codCheck.ok && <Badge variant="secondary" className="text-xs">Available</Badge>}
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">
-                      Pay {settings && formatINR(totals.finalTotal)} in cash when your order is delivered.
+                      Pay {settings && formatINR(computeTotals(subtotal, settings, "cod").finalTotal)} in cash when your order is delivered.
                     </p>
                     {!codCheck.ok && form.pincode && <p className="text-xs text-destructive mt-1">{codCheck.reason}</p>}
                   </div>
@@ -278,12 +362,12 @@ export default function Checkout() {
                 <div className="flex justify-between font-bold text-base">
                   <span>Total</span><span className="text-primary">{formatINR(totals.finalTotal)}</span>
                 </div>
-                {codCheck.ok && (
+                {!isOnline && codCheck.ok && (
                   <p className="text-xs text-muted-foreground bg-muted/60 rounded p-2 flex items-start gap-1.5">
                     <Truck className="w-3.5 h-3.5 mt-0.5 shrink-0" /> Pay {formatINR(totals.finalTotal)} in cash when your order is delivered.
                   </p>
                 )}
-                {!codCheck.ok && settings && (
+                {!isOnline && !codCheck.ok && settings && (
                   <p className="text-xs text-destructive bg-destructive/5 rounded p-2 flex items-start gap-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0" /> COD unavailable: {codCheck.reason}
                   </p>
@@ -299,7 +383,11 @@ export default function Checkout() {
                   disabled={submitting}
                   onClick={handlePlaceOrder}
                 >
-                  {submitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Placing Order...</> : <><Check className="w-4 h-4" /> Place Order (COD)</>}
+                  {submitting
+                    ? <><Loader2 className="w-4 h-4 animate-spin" /> {stage === "confirming" ? "Confirming Payment..." : stage === "paying" ? "Waiting for Payment..." : "Placing Order..."}</>
+                    : isOnline
+                      ? <><CreditCard className="w-4 h-4" /> Pay {settings ? formatINR(totals.finalTotal) : ""} &amp; Place Order</>
+                      : <><Check className="w-4 h-4" /> Place Order (COD)</>}
                 </Button>
                 <p className="text-[11px] text-muted-foreground text-center flex items-center justify-center gap-1">
                   <ShieldCheck className="w-3 h-3" /> Your information is secure & private.
