@@ -14,11 +14,12 @@
 		"run_worker_first": ["/api/*"]
 	},
 	// Database: products, orders, customers, accounts.
-	// On the first `npm run deploy`, Wrangler creates this database and writes its id back here.
+	// Pinned to the live database so every deploy uses the real data instead of creating a new one.
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "deep-jyoti-db"
+			"database_name": "deep-jyoti-db",
+			"database_id": "bc512139-06d8-453c-a64d-c3344f5b6c97"
 		}
 	],
 	// File storage: uploaded prescriptions.
